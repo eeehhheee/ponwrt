@@ -49,11 +49,16 @@ jobs:
         run: |
           set -eux
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG" --notes "PonWrt firmware artifacts published from CI"
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "PonWrt firmware artifacts published from CI" || true
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           set -eux
-          gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            echo "release $TAG not found; keeping files as job artifacts"
+            ls -l dist
+          fi
