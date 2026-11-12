@@ -13,7 +13,7 @@ jobs:
   build:
     name: Build Nokia XG-040G-MD UBI
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 355
 
     steps:
       - uses: actions/checkout@v4
@@ -51,14 +51,58 @@ jobs:
           cp configs/an7581.config .config
           cat configs/release.config >> .config
           cat configs/4g.config >> .config
+          # kernel-build-only modules (kmod-* are bound to the kernel ABI and
+          # can never be installed later from a package feed)
+          cat configs/kmod-extra.config >> .config
           make defconfig
-          # keep only the Nokia XG-040G-MD (UBI) device image
-          sed -i \
-            -e 's/^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp=y/# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp is not set/' \
-            .config
+
+          # Build only the Nokia XG-040G-MD (UBI) image, not the whole subtarget.
+          # configs/an7581.config enables all 12 an7581 devices; drop every
+          # per-device symbol first (device symbols default to n, so defconfig
+          # will not re-enable them) and then select just the one we want.
+          grep -vE '^(# )?CONFIG_TARGET_DEVICE(_PACKAGES)?_airoha_an7581_DEVICE_' .config > .config.new
+          mv .config.new .config
+          echo 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y' >> .config
+          echo 'CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=""' >> .config
           make defconfig
+
           echo "==== device selection ===="
-          grep -E '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_' .config
+          grep -E '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y' .config || true
+          echo "==== target device packages ===="
+          grep -E '^CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=' .config || true
+
+      - name: Verify config
+        run: |
+          set -e
+          fail=0
+          check() { # <config symbol> <human label>
+            if grep -qx "$1" .config; then
+              echo "  ok    $2"
+            else
+              echo "::error::missing $2 ($1)"
+              fail=1
+            fi
+          }
+          echo "== device / image =="
+          check 'CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y' 'target device nokia_xg-040g-md-ubi'
+          check 'CONFIG_TARGET_airoha_an7581=y' 'subtarget an7581'
+          echo "== must-have kernel-build-only modules =="
+          for k in usb-storage usb-net-qmi-wwan usb-net-rtl8152 usb-serial-option \
+                   fs-ext4 fs-vfat fs-exfat fs-ntfs3 fuse loop zram wireguard \
+                   nf-nathelper-extra nft-fullcone sched-cake tcp-bbr \
+                   ipt-core ipt-nat ip6tables ebtables \
+                   usb-hid usb-printer veth bonding ifb; do
+            check "CONFIG_PACKAGE_kmod-$k=y" "kmod-$k"
+          done
+          echo "== requested module total =="
+          want=$(grep -oE '^CONFIG_PACKAGE_[a-z0-9._+-]+=y' configs/kmod-extra.config | sort -u | wc -l)
+          got=$(comm -12 <(grep -oE '^CONFIG_PACKAGE_[a-z0-9._+-]+=y' configs/kmod-extra.config | sort -u) \
+                         <(grep -oE '^CONFIG_PACKAGE_[a-z0-9._+-]+=y' .config | sort -u) | wc -l)
+          echo "  requested=$want enabled=$got"
+          echo "  dropped (unsupported on this target, expected):"
+          comm -23 <(grep -oE '^CONFIG_PACKAGE_[a-z0-9._+-]+=y' configs/kmod-extra.config | sort -u) \
+                   <(grep -oE '^CONFIG_PACKAGE_[a-z0-9._+-]+=y' .config | sort -u) | sed 's/^/    /' || true
+          [ "$fail" -eq 0 ] || exit 1
 
       - name: Download sources
         run: make download -j"$(nproc)" || make download -j4 -k
@@ -68,11 +112,20 @@ jobs:
 
       - name: Pack firmware
         run: |
+          set -e
           mkdir -p release
           ls -l bin/targets/airoha/an7581/
           tar --zstd -cf release/ponwrt-an7581-nokia_xg-040g-md-ubi.tar.zst \
             -C bin/targets/airoha an7581
           (cd release && sha256sum *.tar.zst > sha256sums)
+          cat release/sha256sums
+
+      - name: Show enabled kernel modules
+        run: |
+          echo "=== kmod packages in image ==="
+          grep -E '^CONFIG_PACKAGE_kmod-.*=y$' .config | wc -l
+          echo "=== .ko count in build tree ==="
+          find build_dir -name '*.ko' 2>/dev/null | wc -l
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
